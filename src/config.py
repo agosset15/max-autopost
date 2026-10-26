@@ -41,6 +41,11 @@ BOTAPI_URL = os.getenv("BOTAPI_URL", None)
 BOTAPI_FILE_URL = os.getenv("BOTAPI_FILE_URL", None)
 is_local_api = BOTAPI_URL is not None
 
+# maxapi points at the host MAX currently asks bots to use. Set this only to
+# pin another one — to fall back if that host misbehaves, or to move ahead of a
+# library release when MAX changes it again.
+MAX_API_URL = os.getenv("MAX_API_URL", None)
+
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -184,6 +189,15 @@ for _e in _entries:
 
 if not TG_CHANNEL_ROUTES and not TG_GROUP_ROUTES and not MAX_ROUTES:
     raise RuntimeError(f"'{_CHANNELS_FILE}' contains no mappings.")
+
+# Pairs wired in both directions (bidirectional groups, or two mirrored
+# entries). In such a pair a MAX message may be either an original or the copy
+# of a TG message, so propagating a removal needs the post state to tell which.
+MIRRORED_PAIRS: frozenset[tuple[int, int]] = frozenset(
+    (tg_id, max_id)
+    for name, tg_id, max_id in _seen
+    if name == "tg_to_max" and ("max_to_tg", tg_id, max_id) in _seen
+)
 
 # A channel mirrored in both directions loops: the bot's own channel_post comes
 # back as an update. Groups are safe — TG does not deliver the bot's own messages.

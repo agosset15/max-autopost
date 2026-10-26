@@ -5,11 +5,16 @@ from aiogram.enums import ParseMode
 from maxapi import Bot as MaxBot, Dispatcher as MaxDispatcher
 from aiogram import Bot as TgBot, Dispatcher as TgDispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
-from src.config import MAX_BOT_TOKEN, MESSAGE_MAP_TTL, PROXY_URL, REDIS_URL, TELEGRAM_BOT_TOKEN, BOTAPI_URL, BOTAPI_FILE_URL
+from src.config import MAX_API_URL, MAX_BOT_TOKEN, MESSAGE_MAP_TTL, PROXY_URL, REDIS_URL, TELEGRAM_BOT_TOKEN, BOTAPI_URL, BOTAPI_FILE_URL
 from src.storage.message_map import MessageMapService
 
 # Initialize Bots
 max_bot = MaxBot(token=MAX_BOT_TOKEN)
+if MAX_API_URL:
+    max_bot.set_api_url(MAX_API_URL)
+    logging.info(f"Using custom MAX API server: {MAX_API_URL}")
+else:
+    logging.info(f"Using MAX API server: {max_bot.api_url}")
 max_dp = MaxDispatcher(router_id="main")
 
 session_kwargs: dict = {}
