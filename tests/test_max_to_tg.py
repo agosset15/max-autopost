@@ -8,14 +8,16 @@ in-place patches and which have to be re-sent.
 
 import unittest
 
+from maxapi.types import MessageEdited, MessageRemoved
+
 from tests.support import (
-    FakeMaxBot,
-    FakeTgBot,
     MAX_BOTH,
     MAX_SOURCE,
     TG_BOTH,
     TG_SOURCE_MAX,
     TG_SOURCE_MAX_2,
+    FakeMaxBot,
+    FakeTgBot,
     fake_map,
     max_audio,
     max_file,
@@ -23,8 +25,6 @@ from tests.support import (
     max_message,
     max_video,
 )
-
-from maxapi.types import MessageEdited, MessageRemoved
 
 from src.handlers import max as handler
 from src.storage.message_map import MaxPost, MaxRef, TgItem, TgPost, TgRef
@@ -50,8 +50,22 @@ class _Base(unittest.IsolatedAsyncioTestCase):
         await handler._remember(message.recipient.chat_id, message.body.mid, tg_id, post)
         return post
 
-    async def stored(self, head_id: int, tg_id: int = TG_SOURCE_MAX) -> TgPost | None:
-        return await self.map.get_tg_post(tg_id, head_id)
+    async def stored(self, head_id: int, tg_id: int = TG_SOURCE_MAX) -> TgPost:
+        post = await self.map.get_tg_post(tg_id, head_id)
+        assert post is not None
+        return post
+
+    async def max_of(self, message_id: int, tg_id: int = TG_SOURCE_MAX) -> MaxRef:
+        """The MAX message a mirrored TG message points back at."""
+        mx = await self.map.get_max_in(tg_id, message_id, MAX_SOURCE)
+        assert mx is not None
+        return mx
+
+    async def head_of(self, mid: str, tg_id: int = TG_SOURCE_MAX) -> TgRef:
+        """The first TG message a MAX message was rendered into."""
+        head = await self.map.get_tg_in(MAX_SOURCE, mid, tg_id)
+        assert head is not None
+        return head
 
 
 class PlanLayoutTests(unittest.TestCase):
@@ -75,9 +89,14 @@ class PlanLayoutTests(unittest.TestCase):
         self.assertEqual([(p.kind, p.album) for p in plan], [("photo", True), ("video", True)])
 
     def test_files_follow_the_album_as_single_messages(self):
-        message = max_message(attachments=[
-            max_image("a"), max_image("b"), max_audio("c"), max_file("d"),
-        ])
+        message = max_message(
+            attachments=[
+                max_image("a"),
+                max_image("b"),
+                max_audio("c"),
+                max_file("d"),
+            ]
+        )
         plan, _ = handler.plan_layout(message)
         self.assertEqual(
             [(p.kind, p.album) for p in plan],
@@ -119,17 +138,23 @@ class PatchableTests(unittest.TestCase):
 
     def test_replacing_one_photo_is_patchable(self):
         post = TgPost(items=(TgItem(1, "photo", "t:a", caption=True),))
-        self.assertTrue(handler._patchable(post, self._plan(max_message(attachments=[max_image("b")]))))
+        self.assertTrue(
+            handler._patchable(post, self._plan(max_message(attachments=[max_image("b")])))
+        )
 
     def test_photo_to_video_in_a_lone_message_is_patchable(self):
         post = TgPost(items=(TgItem(1, "photo", "t:a", caption=True),))
-        self.assertTrue(handler._patchable(post, self._plan(max_message(attachments=[max_video("b")]))))
+        self.assertTrue(
+            handler._patchable(post, self._plan(max_message(attachments=[max_video("b")])))
+        )
 
     def test_swapping_album_items_is_patchable(self):
-        post = TgPost(items=(
-            TgItem(1, "photo", "t:a", album=True, caption=True),
-            TgItem(2, "photo", "t:b", album=True),
-        ))
+        post = TgPost(
+            items=(
+                TgItem(1, "photo", "t:a", album=True, caption=True),
+                TgItem(2, "photo", "t:b", album=True),
+            )
+        )
         plan = self._plan(max_message(attachments=[max_image("b"), max_image("a")]))
         self.assertTrue(handler._patchable(post, plan))
 
@@ -139,17 +164,23 @@ class PatchableTests(unittest.TestCase):
         self.assertFalse(handler._patchable(post, plan))
 
     def test_removing_a_photo_needs_a_rebuild(self):
-        post = TgPost(items=(
-            TgItem(1, "photo", "t:a", album=True, caption=True),
-            TgItem(2, "photo", "t:b", album=True),
-        ))
-        self.assertFalse(handler._patchable(post, self._plan(max_message(attachments=[max_image("a")]))))
+        post = TgPost(
+            items=(
+                TgItem(1, "photo", "t:a", album=True, caption=True),
+                TgItem(2, "photo", "t:b", album=True),
+            )
+        )
+        self.assertFalse(
+            handler._patchable(post, self._plan(max_message(attachments=[max_image("a")])))
+        )
 
     def test_album_photo_cannot_become_an_album_document(self):
-        post = TgPost(items=(
-            TgItem(1, "photo", "t:a", album=True, caption=True),
-            TgItem(2, "photo", "t:b", album=True),
-        ))
+        post = TgPost(
+            items=(
+                TgItem(1, "photo", "t:a", album=True, caption=True),
+                TgItem(2, "photo", "t:b", album=True),
+            )
+        )
         plan = [
             handler.Planned(kind="document", sig="t:c", url="u", album=True),
             handler.Planned(kind="document", sig="t:d", url="u", album=True),
@@ -157,18 +188,23 @@ class PatchableTests(unittest.TestCase):
         self.assertFalse(handler._patchable(post, plan))
 
     def test_album_grouping_must_match(self):
-        post = TgPost(items=(
-            TgItem(1, "photo", "t:a", album=True, caption=True),
-            TgItem(2, "audio", "t:b"),
-        ))
+        post = TgPost(
+            items=(
+                TgItem(1, "photo", "t:a", album=True, caption=True),
+                TgItem(2, "audio", "t:b"),
+            )
+        )
         plan = self._plan(max_message(attachments=[max_image("a"), max_image("b")]))
         self.assertFalse(handler._patchable(post, plan))
 
     def test_caption_on_a_later_message_needs_a_rebuild(self):
-        post = TgPost(items=(
-            TgItem(1, "photo", "t:a"),
-            TgItem(2, "audio", "t:b", caption=True),
-        ), text="old")
+        post = TgPost(
+            items=(
+                TgItem(1, "photo", "t:a"),
+                TgItem(2, "audio", "t:b", caption=True),
+            ),
+            text="old",
+        )
         plan = self._plan(max_message(text="new", attachments=[max_image("a"), max_audio("b")]))
         self.assertFalse(handler._patchable(post, plan))
 
@@ -181,9 +217,15 @@ class ForwardTests(_Base):
         self.assertEqual(self.tg.names(), ["send_message"])
 
     async def test_album_plus_file_records_every_message(self):
-        message = max_message(mid="m2", text="cap", attachments=[
-            max_image("a"), max_image("b"), max_file("c"),
-        ])
+        message = max_message(
+            mid="m2",
+            text="cap",
+            attachments=[
+                max_image("a"),
+                max_image("b"),
+                max_file("c"),
+            ],
+        )
         post = await self.mirror(message)
         self.assertEqual([i.kind for i in post.items], ["photo", "photo", "document"])
         self.assertEqual([i.album for i in post.items], [True, True, False])
@@ -194,10 +236,9 @@ class ForwardTests(_Base):
         message = max_message(mid="m3", attachments=[max_image("a"), max_image("b")])
         post = await self.mirror(message)
         for item in post.items:
-            mx = await self.map.get_max_in(TG_SOURCE_MAX, item.message_id, MAX_SOURCE)
-            self.assertIsNotNone(mx)
+            mx = await self.max_of(item.message_id)
             self.assertEqual(mx.mid, "m3")
-        head = await self.map.get_tg_in(MAX_SOURCE, "m3", TG_SOURCE_MAX)
+        head = await self.head_of("m3")
         self.assertEqual(head.message_id, post.items[0].message_id)
 
 
@@ -220,7 +261,8 @@ class EditTests(_Base):
         await self.mirror(max_message(mid="m1", text="old", attachments=[max_image("a")]))
         self.tg.calls.clear()
         await handler.forward_edit_to_tg(
-            max_message(mid="m1", text="new", attachments=[max_image("a")]), TG_SOURCE_MAX,
+            max_message(mid="m1", text="new", attachments=[max_image("a")]),
+            TG_SOURCE_MAX,
         )
         self.assertEqual(self.tg.names(), ["edit_message_caption"])
         self.assertEqual(self.tg.calls[0].kwargs["caption"], "new")
@@ -229,7 +271,8 @@ class EditTests(_Base):
         await self.mirror(max_message(mid="m1", text="old", attachments=[max_image("a")]))
         self.tg.calls.clear()
         await handler.forward_edit_to_tg(
-            max_message(mid="m1", attachments=[max_image("a")]), TG_SOURCE_MAX,
+            max_message(mid="m1", attachments=[max_image("a")]),
+            TG_SOURCE_MAX,
         )
         self.assertEqual(self.tg.names(), ["edit_message_caption"])
         self.assertIsNone(self.tg.calls[0].kwargs["caption"])
@@ -238,7 +281,8 @@ class EditTests(_Base):
         post = await self.mirror(max_message(mid="m1", text="cap", attachments=[max_image("a")]))
         self.tg.calls.clear()
         await handler.forward_edit_to_tg(
-            max_message(mid="m1", text="cap", attachments=[max_image("z")]), TG_SOURCE_MAX,
+            max_message(mid="m1", text="cap", attachments=[max_image("z")]),
+            TG_SOURCE_MAX,
         )
         self.assertEqual(self.tg.names(), ["edit_message_media"])
         self.assertEqual(self.tg.calls[0].kwargs["message_id"], post.items[0].message_id)
@@ -270,7 +314,8 @@ class EditTests(_Base):
         post = await self.mirror(message)
         self.tg.calls.clear()
         await handler.forward_edit_to_tg(
-            max_message(mid="m1", attachments=[max_image("a"), max_image("z")]), TG_SOURCE_MAX,
+            max_message(mid="m1", attachments=[max_image("a"), max_image("z")]),
+            TG_SOURCE_MAX,
         )
         self.assertEqual(self.tg.names(), ["edit_message_media"])
         self.assertEqual(self.tg.calls[0].kwargs["message_id"], post.items[1].message_id)
@@ -286,7 +331,7 @@ class EditTests(_Base):
         self.assertEqual(self.tg.names(), ["send_media_group", "delete_messages"])
         self.assertEqual(self.tg.last_delete(), old_ids)
 
-        head = await self.map.get_tg_in(MAX_SOURCE, "m1", TG_SOURCE_MAX)
+        head = await self.head_of("m1")
         self.assertNotIn(head.message_id, old_ids)
         fresh = await self.stored(head.message_id)
         self.assertEqual([i.kind for i in fresh.items], ["photo", "photo"])
@@ -301,7 +346,8 @@ class EditTests(_Base):
         old_ids = post.message_ids
         self.tg.calls.clear()
         await handler.forward_edit_to_tg(
-            max_message(mid="m1", text="cap", attachments=[max_image("a")]), TG_SOURCE_MAX,
+            max_message(mid="m1", text="cap", attachments=[max_image("a")]),
+            TG_SOURCE_MAX,
         )
         self.assertEqual(self.tg.names(), ["send_photo", "delete_messages"])
         self.assertEqual(self.tg.last_delete(), old_ids)
@@ -310,7 +356,8 @@ class EditTests(_Base):
         post = await self.mirror(max_message(mid="m1", text="hi"))
         self.tg.calls.clear()
         await handler.forward_edit_to_tg(
-            max_message(mid="m1", text="hi", attachments=[max_image("a")]), TG_SOURCE_MAX,
+            max_message(mid="m1", text="hi", attachments=[max_image("a")]),
+            TG_SOURCE_MAX,
         )
         self.assertEqual(self.tg.names(), ["send_photo", "delete_messages"])
         self.assertEqual(self.tg.last_delete(), post.message_ids)
@@ -327,7 +374,8 @@ class EditTests(_Base):
         self.tg.calls.clear()
         self.tg.refuse.add("edit_message_caption")
         await handler.forward_edit_to_tg(
-            max_message(mid="m1", text="new", attachments=[max_image("a")]), TG_SOURCE_MAX,
+            max_message(mid="m1", text="new", attachments=[max_image("a")]),
+            TG_SOURCE_MAX,
         )
         self.assertEqual(
             self.tg.names(),
@@ -340,11 +388,12 @@ class EditTests(_Base):
         self.tg.calls.clear()
         self.tg.refuse.add("send_photo")
         await handler.forward_edit_to_tg(
-            max_message(mid="m1", text="hi", attachments=[max_image("a")]), TG_SOURCE_MAX,
+            max_message(mid="m1", text="hi", attachments=[max_image("a")]),
+            TG_SOURCE_MAX,
         )
         # the degraded re-send is rolled back, the original copy stays mapped
         self.assertEqual(self.tg.last_delete(), [self.tg.next_id])
-        head = await self.map.get_tg_in(MAX_SOURCE, "m1", TG_SOURCE_MAX)
+        head = await self.head_of("m1")
         self.assertEqual(head.message_id, post.items[0].message_id)
         self.assertEqual((await self.stored(head.message_id)).text, "hi")
 
@@ -364,7 +413,8 @@ class EditTests(_Base):
         await self.map.drop_tg_post(TG_SOURCE_MAX, post.items[0].message_id)
         self.tg.calls.clear()
         await handler.forward_edit_to_tg(
-            max_message(mid="m1", text="new", attachments=[max_image("a")]), TG_SOURCE_MAX,
+            max_message(mid="m1", text="new", attachments=[max_image("a")]),
+            TG_SOURCE_MAX,
         )
         self.assertEqual(self.tg.names(), ["edit_message_caption"])
 
@@ -373,36 +423,47 @@ class HandlerGuardTests(_Base):
     async def test_edit_of_our_own_copy_is_not_propagated(self):
         """A MAX message this bot created from TG must not edit the TG original."""
         await self.map.bind(
-            TgRef(chat_id=TG_BOTH, message_id=77), MaxRef(chat_id=MAX_BOTH, mid="copy"),
+            TgRef(chat_id=TG_BOTH, message_id=77),
+            MaxRef(chat_id=MAX_BOTH, mid="copy"),
         )
         await self.map.set_max_post(MAX_BOTH, "copy", MaxPost(text="hi", caption_tg_id=77))
 
-        await handler.on_max_message_edited(MessageEdited(
-            timestamp=0, message=max_message(chat_id=MAX_BOTH, mid="copy", text="changed"),
-        ))
+        await handler.on_max_message_edited(
+            MessageEdited(
+                timestamp=0,
+                message=max_message(chat_id=MAX_BOTH, mid="copy", text="changed"),
+            )
+        )
         self.assertEqual(self.tg.names(), [])
 
     async def test_edit_by_the_bot_itself_is_ignored(self):
         await self.mirror(max_message(mid="m1", text="hi"))
         self.tg.calls.clear()
-        await handler.on_max_message_edited(MessageEdited(
-            timestamp=0,
-            message=max_message(mid="m1", text="changed", sender_id=self.max.me.user_id),
-        ))
+        await handler.on_max_message_edited(
+            MessageEdited(
+                timestamp=0,
+                message=max_message(mid="m1", text="changed", sender_id=self.max.me.user_id),
+            )
+        )
         self.assertEqual(self.tg.names(), [])
 
     async def test_edit_handler_fans_out_to_every_target(self):
         first = await self.mirror(max_message(mid="m1", text="hi"))
         second = await self.mirror(max_message(mid="m1", text="hi"), tg_id=TG_SOURCE_MAX_2)
         self.tg.calls.clear()
-        await handler.on_max_message_edited(MessageEdited(
-            timestamp=0, message=max_message(mid="m1", text="changed"),
-        ))
+        await handler.on_max_message_edited(
+            MessageEdited(
+                timestamp=0,
+                message=max_message(mid="m1", text="changed"),
+            )
+        )
         self.assertEqual(self.tg.names(), ["edit_message_text", "edit_message_text"])
         self.assertEqual(
             [(c.kwargs["chat_id"], c.kwargs["message_id"]) for c in self.tg.calls],
-            [(TG_SOURCE_MAX, first.items[0].message_id),
-             (TG_SOURCE_MAX_2, second.items[0].message_id)],
+            [
+                (TG_SOURCE_MAX, first.items[0].message_id),
+                (TG_SOURCE_MAX_2, second.items[0].message_id),
+            ],
         )
 
     async def test_removal_handler_fans_out_to_every_target(self):
@@ -430,7 +491,7 @@ class RemovalTests(_Base):
         self.assertEqual(self.tg.last_delete(), post.message_ids)
         for message_id in post.message_ids:
             self.assertIsNone(await self.map.get_max_in(TG_SOURCE_MAX, message_id, MAX_SOURCE))
-        self.assertIsNone(await self.stored(post.items[0].message_id))
+        self.assertIsNone(await self.map.get_tg_post(TG_SOURCE_MAX, post.items[0].message_id))
 
     async def test_removal_without_a_mapping_is_ignored(self):
         await handler.remove_from_tg(MAX_SOURCE, "gone", TG_SOURCE_MAX)
@@ -454,7 +515,8 @@ class RemovalTests(_Base):
     async def test_removal_of_our_own_copy_is_not_propagated(self):
         """A MAX message this bot created from TG must not delete the TG original."""
         await self.map.bind(
-            TgRef(chat_id=TG_BOTH, message_id=77), MaxRef(chat_id=MAX_BOTH, mid="copy"),
+            TgRef(chat_id=TG_BOTH, message_id=77),
+            MaxRef(chat_id=MAX_BOTH, mid="copy"),
         )
         await self.map.set_max_post(MAX_BOTH, "copy", MaxPost(text="hi", caption_tg_id=77))
 
@@ -478,7 +540,10 @@ class RemovalTests(_Base):
         self.tg.calls.clear()
         await handler.on_max_message_removed(
             MessageRemoved(
-                message_id="m1", chat_id=MAX_SOURCE, user_id=self.max.me.user_id, timestamp=0,
+                message_id="m1",
+                chat_id=MAX_SOURCE,
+                user_id=self.max.me.user_id,
+                timestamp=0,
             )
         )
         self.assertEqual(self.tg.names(), [])

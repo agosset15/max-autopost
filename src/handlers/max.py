@@ -2,8 +2,9 @@ import html
 import logging
 import os
 import tempfile
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from aiogram.enums import ParseMode as TgParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
@@ -16,28 +17,28 @@ from aiogram.types import (
     Message as TgMessage,
     ReplyParameters,
 )
+from maxapi import F, Router
 from maxapi.enums.attachment import AttachmentType
 from maxapi.enums.message_link_type import MessageLinkType
 from maxapi.types import BotStarted, MessageCreated, MessageEdited, MessageRemoved
-from maxapi import F, Router
 
 from src.config import MAX_ROUTES, MIRRORED_PAIRS, Route
 from src.loader import max_bot, message_map, tg_bot
 from src.locks import keyed_lock
 from src.storage.message_map import MaxRef, TgItem, TgPost, TgRef
 
+logger = logging.getLogger(__name__)
+
 max_router = Router(router_id="main")
 
 
 @max_router.bot_started()
 async def bot_started(event: BotStarted):
-    await max_bot.send_message(
-        chat_id=event.chat_id,
-        text='Привет! Отправь мне /start'
-    )
+    await max_bot.send_message(chat_id=event.chat_id, text="Привет! Отправь мне /start")
 
 
 # ====== SIGN UTILS ======
+
 
 def build_sign_prefix(sender) -> str:
     """Build HTML signature prefix `<b>Name</b>:\\n` for MAX -> TG sign_names mode."""
@@ -61,6 +62,7 @@ def _apply_prefix(prefix: str, text: str | None) -> str | None:
 
 
 # ====== TEMP UTILS ======
+
 
 def _cleanup(path: str) -> None:
     try:
@@ -97,12 +99,19 @@ def cleanup_cache(cache: dict[str, str]) -> None:
 
 # ====== ATTACHMENT URL ======
 
+
 def _attachment_url(att) -> str | None:
     if att.type == AttachmentType.VIDEO:
         urls = getattr(att, "urls", None)
         if urls:
-            for res in (urls.mp4_1080, urls.mp4_720, urls.mp4_480,
-                        urls.mp4_360, urls.mp4_240, urls.mp4_144):
+            for res in (
+                urls.mp4_1080,
+                urls.mp4_720,
+                urls.mp4_480,
+                urls.mp4_360,
+                urls.mp4_240,
+                urls.mp4_144,
+            ):
                 if res:
                     return res
     payload = getattr(att, "payload", None)
@@ -126,6 +135,7 @@ def _attachment_sig(att) -> str:
 
 # ====== SAFE SEND (HTML -> plain fallback) ======
 
+
 async def _safe(build):
     """build(parse_mode) -> coroutine returning a Message (or list).
 
@@ -135,7 +145,7 @@ async def _safe(build):
     try:
         return await build(TgParseMode.HTML)
     except TelegramBadRequest as e:
-        logging.warning("TG send failed (%s); retrying as plain text", e)
+        logger.warning("TG send failed (%s); retrying as plain text", e)
         return await build(None)
 
 
@@ -156,14 +166,14 @@ async def _safe_edit(build: Callable[[Any], Awaitable[Any]]) -> bool:
     except TelegramBadRequest as e:
         if _not_modified(e):
             return True
-        logging.warning("TG edit (HTML) failed (%s); retrying as plain text", e)
+        logger.warning("TG edit (HTML) failed (%s); retrying as plain text", e)
     try:
         await build(None)
         return True
     except TelegramAPIError as e:
         if _not_modified(e):
             return True
-        logging.warning("TG edit failed (%s)", e)
+        logger.warning("TG edit failed (%s)", e)
         return False
 
 
@@ -192,7 +202,11 @@ async def _send_text(tg_id: int, text: str, reply_to: int | None = None) -> TgMe
 
 
 async def _send_single_media(
-    tg_id: int, att, path: str, caption: str | None, reply_to: int | None = None,
+    tg_id: int,
+    att,
+    path: str,
+    caption: str | None,
+    reply_to: int | None = None,
 ) -> TgMessage | None:
     method_name, kw = SINGLE_SEND[att.type]
     send = getattr(tg_bot, method_name)
@@ -207,7 +221,10 @@ async def _send_single_media(
 
 
 async def _send_media_group(
-    tg_id: int, items: list, caption: str | None, reply_to: int | None = None,
+    tg_id: int,
+    items: list,
+    caption: str | None,
+    reply_to: int | None = None,
 ) -> list[TgMessage] | None:
     rp = ReplyParameters(message_id=reply_to) if reply_to else None
 
@@ -215,11 +232,13 @@ async def _send_media_group(
         media = []
         for i, (att, path) in enumerate(items):
             cls = MEDIA_CLS[att.type]
-            media.append(cls(
-                media=FSInputFile(path),
-                caption=caption if i == 0 else None,
-                parse_mode=pm,
-            ))
+            media.append(
+                cls(
+                    media=FSInputFile(path),
+                    caption=caption if i == 0 else None,
+                    parse_mode=pm,
+                )
+            )
         return await tg_bot.send_media_group(tg_id, media, reply_parameters=rp)
 
     return await _safe(build)
@@ -290,11 +309,11 @@ def plan_layout(message, sender_prefix: str = "") -> tuple[list[Planned], str | 
     files: list = []
     for att in attachments:
         if att.type not in SUPPORTED:
-            logging.info("Skipping unsupported MAX attachment %s", att.type)
+            logger.info("Skipping unsupported MAX attachment %s", att.type)
             continue
         url = _attachment_url(att)
         if not url:
-            logging.info("Skipping MAX attachment %s without url", att.type)
+            logger.info("Skipping MAX attachment %s without url", att.type)
             continue
         (media if att.type in (AttachmentType.IMAGE, AttachmentType.VIDEO) else files).append(
             (att, url)
@@ -317,6 +336,7 @@ def plan_layout(message, sender_prefix: str = "") -> tuple[list[Planned], str | 
 
 # ====== FORWARDING ======
 
+
 async def _resolve_reply_to(message, tg_id: int) -> int | None:
     """If MAX message replies to another, look up its copy inside `tg_id`."""
     link = getattr(message, "link", None)
@@ -335,7 +355,10 @@ async def _resolve_reply_to(message, tg_id: int) -> int | None:
 
 
 async def forward_to_tg(
-    message, tg_id: int, sender_prefix: str = "", cache: dict[str, str] | None = None,
+    message,
+    tg_id: int,
+    sender_prefix: str = "",
+    cache: dict[str, str] | None = None,
 ) -> TgPost:
     """Forward MAX message to TG. Returns the layout it actually produced.
 
@@ -367,29 +390,38 @@ async def forward_to_tg(
         try:
             if len(downloaded) >= 2:
                 msgs = await _send_media_group(
-                    tg_id, [(p.att, path) for p, path in downloaded], caption, reply_to=reply_to,
+                    tg_id,
+                    [(p.att, path) for p, path in downloaded],
+                    caption,
+                    reply_to=reply_to,
                 )
                 if msgs:
                     for i, (msg, (p, _)) in enumerate(zip(msgs, downloaded)):
-                        sent.append(TgItem(
-                            message_id=msg.message_id,
-                            kind=p.kind,
-                            sig=p.sig,
-                            album=True,
-                            caption=i == 0 and caption is not None,
-                        ))
+                        sent.append(
+                            TgItem(
+                                message_id=msg.message_id,
+                                kind=p.kind,
+                                sig=p.sig,
+                                album=True,
+                                caption=i == 0 and caption is not None,
+                            )
+                        )
                     caption = None
             elif len(downloaded) == 1:
                 p, path = downloaded[0]
                 msg = await _send_single_media(tg_id, p.att, path, caption, reply_to=reply_to)
                 if msg is not None:
-                    sent.append(TgItem(
-                        message_id=msg.message_id, kind=p.kind, sig=p.sig,
-                        caption=caption is not None,
-                    ))
+                    sent.append(
+                        TgItem(
+                            message_id=msg.message_id,
+                            kind=p.kind,
+                            sig=p.sig,
+                            caption=caption is not None,
+                        )
+                    )
                     caption = None
         except TelegramAPIError as e:
-            logging.warning("Failed sending MAX media -> TG %d: %s", tg_id, e)
+            logger.warning("Failed sending MAX media -> TG %d: %s", tg_id, e)
 
         for p in singles:
             path = await _fetch(p, cache)
@@ -398,13 +430,17 @@ async def forward_to_tg(
             try:
                 msg = await _send_single_media(tg_id, p.att, path, caption, reply_to=reply_to)
             except TelegramAPIError as e:
-                logging.warning("Failed sending MAX attachment -> TG %d: %s", tg_id, e)
+                logger.warning("Failed sending MAX attachment -> TG %d: %s", tg_id, e)
                 continue
             if msg is not None:
-                sent.append(TgItem(
-                    message_id=msg.message_id, kind=p.kind, sig=p.sig,
-                    caption=caption is not None,
-                ))
+                sent.append(
+                    TgItem(
+                        message_id=msg.message_id,
+                        kind=p.kind,
+                        sig=p.sig,
+                        caption=caption is not None,
+                    )
+                )
                 caption = None
 
         # text-only post, or every attachment failed — deliver the text anyway
@@ -413,7 +449,7 @@ async def forward_to_tg(
             if msg is not None:
                 sent.append(TgItem(message_id=msg.message_id, kind=TEXT, caption=True))
 
-        logging.info("Forwarded MAX message -> TG %d (%d messages)", tg_id, len(sent))
+        logger.info("Forwarded MAX message -> TG %d (%d messages)", tg_id, len(sent))
     finally:
         if own_cache:
             cleanup_cache(cache)
@@ -426,8 +462,8 @@ async def _fetch(planned: Planned, cache: dict[str, str]) -> str | None:
         return None
     try:
         return await _download_cached(planned.url, cache)
-    except Exception as e:
-        logging.warning("MAX download failed (%s); skipping", e)
+    except Exception as e:  # noqa: BLE001 - any download failure just skips the media
+        logger.warning("MAX download failed (%s); skipping", e)
         return None
 
 
@@ -447,10 +483,14 @@ async def _forget(tg_id: int, post: TgPost) -> None:
 
 # ====== EDIT FORWARDING ======
 
+
 async def _edit_text(tg_id: int, message_id: int, text: str) -> bool:
     async def build(pm):
         return await tg_bot.edit_message_text(
-            chat_id=tg_id, message_id=message_id, text=text, parse_mode=pm,
+            chat_id=tg_id,
+            message_id=message_id,
+            text=text,
+            parse_mode=pm,
         )
 
     return await _safe_edit(build)
@@ -459,14 +499,21 @@ async def _edit_text(tg_id: int, message_id: int, text: str) -> bool:
 async def _edit_caption(tg_id: int, message_id: int, caption: str | None) -> bool:
     async def build(pm):
         return await tg_bot.edit_message_caption(
-            chat_id=tg_id, message_id=message_id, caption=caption, parse_mode=pm,
+            chat_id=tg_id,
+            message_id=message_id,
+            caption=caption,
+            parse_mode=pm,
         )
 
     return await _safe_edit(build)
 
 
 async def _edit_media(
-    tg_id: int, message_id: int, planned: Planned, path: str, caption: str | None,
+    tg_id: int,
+    message_id: int,
+    planned: Planned,
+    path: str,
+    caption: str | None,
 ) -> bool:
     cls = EDIT_MEDIA_CLS[planned.kind]
     filename = getattr(planned.att, "filename", None)
@@ -513,7 +560,10 @@ def _patchable(post: TgPost, plan: list[Planned]) -> bool:
 
 
 async def _patch_in_place(
-    tg_id: int, post: TgPost, plan: list[Planned], text: str | None,
+    tg_id: int,
+    post: TgPost,
+    plan: list[Planned],
+    text: str | None,
 ) -> TgPost | None:
     """Apply a same-shape edit to the messages already in the chat.
 
@@ -530,18 +580,18 @@ async def _patch_in_place(
             caption = text if carries else None
 
             if new.kind == TEXT:
-                if text_changed and text:
-                    if not await _edit_text(tg_id, old.message_id, text):
-                        raise _NeedsRebuild
+                if text_changed and text and not await _edit_text(tg_id, old.message_id, text):
+                    raise _NeedsRebuild
                 items.append(TgItem(message_id=old.message_id, kind=TEXT, caption=True))
                 continue
 
             if new.sig != old.sig:
                 path = await _fetch(new, cache)
                 if path is None:
-                    logging.warning(
+                    logger.warning(
                         "Cannot fetch new media for TG (%d, %d); edit skipped",
-                        tg_id, old.message_id,
+                        tg_id,
+                        old.message_id,
                     )
                     return None
                 if not await _edit_media(tg_id, old.message_id, new, path, caption):
@@ -550,13 +600,15 @@ async def _patch_in_place(
                 if not await _edit_caption(tg_id, old.message_id, text):
                     raise _NeedsRebuild
 
-            items.append(TgItem(
-                message_id=old.message_id,
-                kind=new.kind,
-                sig=new.sig,
-                album=new.album,
-                caption=carries and caption is not None,
-            ))
+            items.append(
+                TgItem(
+                    message_id=old.message_id,
+                    kind=new.kind,
+                    sig=new.sig,
+                    album=new.album,
+                    caption=carries and caption is not None,
+                )
+            )
     finally:
         cleanup_cache(cache)
 
@@ -571,16 +623,21 @@ async def _delete_items(tg_id: int, post: TgPost) -> None:
         await tg_bot.delete_messages(tg_id, ids)
         return
     except TelegramAPIError as e:
-        logging.warning("Bulk delete in TG %d failed (%s); deleting one by one", tg_id, e)
+        logger.warning("Bulk delete in TG %d failed (%s); deleting one by one", tg_id, e)
     for message_id in ids:
         try:
             await tg_bot.delete_message(tg_id, message_id)
         except TelegramAPIError as e:
-            logging.warning("Cannot delete TG (%d, %d): %s", tg_id, message_id, e)
+            logger.warning("Cannot delete TG (%d, %d): %s", tg_id, message_id, e)
 
 
 async def _rebuild(
-    message, tg_id: int, sender_prefix: str, post: TgPost, max_chat_id: int, mid: str,
+    message,
+    tg_id: int,
+    sender_prefix: str,
+    post: TgPost,
+    max_chat_id: int,
+    mid: str,
 ) -> None:
     """Re-send a post whose new shape Telegram cannot reach by editing.
 
@@ -594,7 +651,7 @@ async def _rebuild(
             # A media file would not go through, so the re-send came out
             # degraded. Replacing a complete post with a lesser one loses
             # content for good; keeping the old copy only misses this edit.
-            logging.warning(
+            logger.warning(
                 "Rebuild after MAX edit came out degraded for TG %d (%s instead of %s); "
                 "keeping the old copy",
                 tg_id,
@@ -610,9 +667,12 @@ async def _rebuild(
     await _delete_items(tg_id, post)
     await _forget(tg_id, post)
     await _remember(max_chat_id, mid, tg_id, fresh)
-    logging.info(
+    logger.info(
         "Rebuilt MAX %s in TG %d (%d -> %d messages)",
-        mid, tg_id, len(post.items), len(fresh.items),
+        mid,
+        tg_id,
+        len(post.items),
+        len(fresh.items),
     )
 
 
@@ -625,9 +685,11 @@ async def forward_edit_to_tg(message, tg_id: int, sender_prefix: str = "") -> No
 
     head = await message_map.get_tg_in(max_chat_id, body.mid, tg_id)
     if head is None:
-        logging.info(
+        logger.info(
             "Edit ignored: no TG mapping for MAX (%s, %s) in TG %d",
-            max_chat_id, body.mid, tg_id,
+            max_chat_id,
+            body.mid,
+            tg_id,
         )
         return
 
@@ -644,11 +706,11 @@ async def forward_edit_to_tg(message, tg_id: int, sender_prefix: str = "") -> No
         try:
             patched = await _patch_in_place(tg_id, post, plan, text)
         except _NeedsRebuild:
-            logging.info("In-place edit of MAX %s in TG %d refused; rebuilding", body.mid, tg_id)
+            logger.info("In-place edit of MAX %s in TG %d refused; rebuilding", body.mid, tg_id)
         else:
             if patched is not None:
                 await message_map.set_tg_post(tg_id, patched.items[0].message_id, patched)
-                logging.info("Edited MAX %s in TG %d in place", body.mid, tg_id)
+                logger.info("Edited MAX %s in TG %d in place", body.mid, tg_id)
             return
 
     await _rebuild(message, tg_id, sender_prefix, post, max_chat_id, body.mid)
@@ -663,10 +725,11 @@ async def _legacy_patch(tg_id: int, message_id: int, text: str | None, has_media
         else await _edit_text(tg_id, message_id, text)
     )
     if ok:
-        logging.info("Edited TG (%d, %d) after MAX edit", tg_id, message_id)
+        logger.info("Edited TG (%d, %d) after MAX edit", tg_id, message_id)
 
 
 # ====== REMOVAL FORWARDING ======
+
 
 def _is_own_copy_pair(tg_id: int, max_id: int) -> bool:
     """True if `max_id` also receives copies of `tg_id`, so its messages are ambiguous."""
@@ -677,9 +740,11 @@ async def remove_from_tg(max_chat_id: int, mid: str, tg_id: int) -> None:
     """Delete the TG copy of a MAX message that was removed."""
     head = await message_map.get_tg_in(max_chat_id, mid, tg_id)
     if head is None:
-        logging.info(
+        logger.info(
             "Removal ignored: no TG mapping for MAX (%s, %s) in TG %d",
-            max_chat_id, mid, tg_id,
+            max_chat_id,
+            mid,
+            tg_id,
         )
         return
 
@@ -689,28 +754,35 @@ async def remove_from_tg(max_chat_id: int, mid: str, tg_id: int) -> None:
         # a one-way pair it has to be; in a mirrored one it may be the original,
         # and deleting a user's own message would be worse than missing a sync.
         if _is_own_copy_pair(tg_id, max_chat_id):
-            logging.warning(
+            logger.warning(
                 "Removal of MAX (%s, %s) not propagated: no layout for TG (%d, %d) "
                 "in a bidirectional pair — cannot tell the copy from the original",
-                max_chat_id, mid, tg_id, head.message_id,
+                max_chat_id,
+                mid,
+                tg_id,
+                head.message_id,
             )
             return
         post = TgPost(items=(TgItem(message_id=head.message_id, kind=TEXT),))
 
     await _delete_items(tg_id, post)
     await _forget(tg_id, post)
-    logging.info("Removed %d TG message(s) in %d after MAX removal", len(post.items), tg_id)
+    logger.info("Removed %d TG message(s) in %d after MAX removal", len(post.items), tg_id)
 
 
 # ====== MAIN HANDLERS ======
+
 
 def _targets(chat_id: int, sender) -> list[tuple[Route, str]]:
     """Routes leaving this MAX chat that accept `sender`, each with its prefix."""
     out: list[tuple[Route, str]] = []
     for route in MAX_ROUTES.get(chat_id, ()):
-        if route.allowed_user_ids is not None:
-            if sender and sender.user_id not in route.allowed_user_ids:
-                continue
+        if (
+            route.allowed_user_ids is not None
+            and sender
+            and sender.user_id not in route.allowed_user_ids
+        ):
+            continue
         out.append((route, build_sign_prefix(sender) if route.sign_names else ""))
     return out
 
@@ -733,9 +805,10 @@ async def on_max_message(event: MessageCreated):
     if not targets:
         return
 
-    logging.info(
+    logger.info(
         "New MAX message in chat %s -> TG ids %s",
-        chat_id, [route.tg_id for route, _ in targets],
+        chat_id,
+        [route.tg_id for route, _ in targets],
     )
 
     body = event.message.body
@@ -743,7 +816,10 @@ async def on_max_message(event: MessageCreated):
     try:
         for route, sender_prefix in targets:
             post = await forward_to_tg(
-                event.message, route.tg_id, sender_prefix=sender_prefix, cache=cache,
+                event.message,
+                route.tg_id,
+                sender_prefix=sender_prefix,
+                cache=cache,
             )
             if body is not None:
                 await _remember(chat_id, body.mid, route.tg_id, post)
@@ -765,12 +841,12 @@ async def on_max_message_edited(event: MessageEdited):
     # In a bidirectional pair this MAX message may itself be a copy of a TG one;
     # editing "back" would fight the TG original instead of following it.
     if await message_map.has_max_post(chat_id, body.mid):
-        logging.info("MAX %s is a copy of a TG message; edit not propagated", body.mid)
+        logger.info("MAX %s is a copy of a TG message; edit not propagated", body.mid)
         return
 
     async with keyed_lock((chat_id, body.mid)):
         for route, sender_prefix in _targets(chat_id, sender):
-            logging.info("MAX message edited in chat %s -> TG %d", chat_id, route.tg_id)
+            logger.info("MAX message edited in chat %s -> TG %d", chat_id, route.tg_id)
             await forward_edit_to_tg(event.message, route.tg_id, sender_prefix=sender_prefix)
 
 
@@ -788,7 +864,7 @@ async def on_max_message_removed(event: MessageRemoved):
         return
 
     if await message_map.has_max_post(chat_id, mid):
-        logging.info("MAX %s is a copy of a TG message; removal not propagated", mid)
+        logger.info("MAX %s is a copy of a TG message; removal not propagated", mid)
         await message_map.forget_max(chat_id, mid)
         return
 
@@ -796,6 +872,6 @@ async def on_max_message_removed(event: MessageRemoved):
         for route in MAX_ROUTES.get(chat_id, ()):
             # No user filter here: a message already mirrored should disappear
             # whoever removed it, including an admin who is not on the whitelist.
-            logging.info("MAX message removed in chat %s -> TG %d", chat_id, route.tg_id)
+            logger.info("MAX message removed in chat %s -> TG %d", chat_id, route.tg_id)
             await remove_from_tg(chat_id, mid, route.tg_id)
         await message_map.forget_max(chat_id, mid)

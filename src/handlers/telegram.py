@@ -6,11 +6,11 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass
-from typing import Any, TypeAlias, Union
+from typing import Any, TypeAlias
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import Message as TgMessage, Video, PhotoSize, Document, Audio
+from aiogram.types import Audio, Document, Message as TgMessage, PhotoSize, Video
 from maxapi.enums.attachment import AttachmentType
 from maxapi.enums.message_link_type import MessageLinkType
 from maxapi.enums.parse_mode import ParseMode
@@ -25,12 +25,13 @@ from src.loader import max_bot, message_map, tg_bot
 from src.locks import keyed_lock, keyed_throttle
 from src.storage.message_map import MaxAtt, MaxPost, MaxRef, TgRef
 
+logger = logging.getLogger(__name__)
 
 media_groups: dict[str, list[TgMessage]] = {}
 media_group_targets: dict[str, list["Target"]] = {}
 _bg_tasks: set[asyncio.Task] = set()
 
-AnyMedia: TypeAlias = Union[Video, PhotoSize, Document, Audio]
+AnyMedia: TypeAlias = Video | PhotoSize | Document | Audio
 # One destination of a TG message: the route plus the signature prefix it wants.
 Target: TypeAlias = tuple[Route, str]
 # What one uploaded file was: (source TG message, file identity, MAX upload type).
@@ -44,7 +45,7 @@ async def _safe_max_send(**kwargs) -> SendedMessage | None:
     try:
         return await max_bot.send_message(parse_mode=ParseMode.HTML, **kwargs)
     except MaxApiError as e:
-        logging.warning("MAX send failed (%s); retrying as plain text", e)
+        logger.warning("MAX send failed (%s); retrying as plain text", e)
         return await max_bot.send_message(parse_mode=None, **kwargs)
 
 
@@ -63,16 +64,16 @@ async def _safe_max_edit(max_id: int, **kwargs) -> bool:
         await max_bot.edit_message(parse_mode=ParseMode.HTML, **kwargs)
         return True
     except ValueError as e:
-        logging.warning("MAX edit rejected (%s)", e)
+        logger.warning("MAX edit rejected (%s)", e)
         return False
     except MaxApiError as e:
-        logging.warning("MAX edit failed as HTML (%s); retrying as plain text", e)
+        logger.warning("MAX edit failed as HTML (%s); retrying as plain text", e)
     await _edit_throttle.wait(max_id)
     try:
         await max_bot.edit_message(parse_mode=None, **kwargs)
         return True
     except (MaxApiError, ValueError) as e:
-        logging.warning("MAX edit failed (%s)", e)
+        logger.warning("MAX edit failed (%s)", e)
         return False
 
 
@@ -143,12 +144,14 @@ def _sent_atts(sent: SendedMessage | None, uploaded: list[Uploaded]) -> tuple[Ma
         atts = sent.message.body.attachments or []
     out = []
     for i, (tg_message_id, sig, upload_type) in enumerate(uploaded):
-        out.append(MaxAtt(
-            kind=upload_type.value,
-            sig=sig,
-            token=_att_token(atts[i]) if i < len(atts) else "",
-            tg_message_id=tg_message_id,
-        ))
+        out.append(
+            MaxAtt(
+                kind=upload_type.value,
+                sig=sig,
+                token=_att_token(atts[i]) if i < len(atts) else "",
+                tg_message_id=tg_message_id,
+            )
+        )
     return tuple(out)
 
 
@@ -157,7 +160,7 @@ async def _remote_message(mid: str):
     try:
         return await max_bot.get_message(mid)
     except (MaxApiError, ValueError) as e:
-        logging.warning("Cannot read MAX message %s: %s", mid, e)
+        logger.warning("Cannot read MAX message %s: %s", mid, e)
         return None
 
 
@@ -179,12 +182,15 @@ MENTION_RE = re.compile(r"(?<![\w@/])@([A-Za-z][A-Za-z0-9_]{4,31})\b")
 
 # ====== TEXT UTILS ======
 
+
 def linkify_mentions(html: str) -> str:
     """Wrap @mentions in <a href="https://t.me/..."> while skipping existing anchors."""
     parts = []
     last = 0
     for m in ANCHOR_RE.finditer(html):
-        parts.append(MENTION_RE.sub(r'<a href="https://t.me/\1">@tg:\1</a>', html[last:m.start()]))
+        parts.append(
+            MENTION_RE.sub(r'<a href="https://t.me/\1">@tg:\1</a>', html[last : m.start()])
+        )
         parts.append(m.group(0))
         last = m.end()
     parts.append(MENTION_RE.sub(r'<a href="https://t.me/\1">@tg:\1</a>', html[last:]))
@@ -297,7 +303,7 @@ async def send_media(
     try:
         temp_path = await download_to_temp(file, suffix)
     except (TelegramBadRequest, ValueError) as e:
-        logging.warning("Cannot download file: %s", e)
+        logger.warning("Cannot download file: %s", e)
         return None
 
     try:
@@ -313,6 +319,7 @@ async def send_media(
 
 
 # ====== MEDIA GROUP ======
+
 
 async def send_media_group(media_group_id: str):
     """Flush one TG album: download every item once, then post it to each target."""
@@ -340,7 +347,7 @@ async def send_media_group(media_group_id: str):
             try:
                 path = await download_to_temp(media.file, media.suffix)
             except (TelegramBadRequest, ValueError) as e:
-                logging.warning("Media group %s: skipping item — %s", media_group_id, e)
+                logger.warning("Media group %s: skipping item — %s", media_group_id, e)
                 continue
 
             temp_files.append(path)
@@ -362,13 +369,11 @@ async def send_media_group(media_group_id: str):
                     attachments=[InputMedia(path, upload_type) for path, upload_type in specs],
                     link=link,
                 )
-            except Exception as e:
-                logging.exception(
-                    "Media group %s -> MAX %d failed: %s", media_group_id, route.max_id, e
-                )
+            except Exception:
+                logger.exception("Media group %s -> MAX %d failed", media_group_id, route.max_id)
                 continue
 
-            logging.info(
+            logger.info(
                 "Forwarded media group %s (%d items) to MAX channel %d",
                 media_group_id,
                 len(specs),
@@ -377,14 +382,18 @@ async def send_media_group(media_group_id: str):
             mid = _extract_mid(sent)
             if mid:
                 await message_map.bind_many(tg_refs, MaxRef(chat_id=route.max_id, mid=mid))
-                await message_map.set_max_post(route.max_id, mid, MaxPost(
-                    atts=_sent_atts(sent, uploaded),
-                    text=text,
-                    caption_tg_id=caption_msg.message_id if caption_msg else None,
-                ))
+                await message_map.set_max_post(
+                    route.max_id,
+                    mid,
+                    MaxPost(
+                        atts=_sent_atts(sent, uploaded),
+                        text=text,
+                        caption_tg_id=caption_msg.message_id if caption_msg else None,
+                    ),
+                )
 
-    except Exception as e:
-        logging.exception("Media group error: %s", e)
+    except Exception:
+        logger.exception("Media group error")
 
     finally:
         for path in temp_files:
@@ -421,17 +430,19 @@ def _tg_media(message: TgMessage) -> TgMedia | None:
 
 # ====== ROUTING ======
 
+
 def _passes(route: Route, message: TgMessage, check_threads: bool) -> bool:
-    if route.allowed_user_ids is not None:
-        if not message.from_user or message.from_user.id not in route.allowed_user_ids:
-            return False
+    if route.allowed_user_ids is not None and (
+        not message.from_user or message.from_user.id not in route.allowed_user_ids
+    ):
+        return False
 
-    if check_threads and route.allowed_thread_ids is not None:
-        if (message.message_thread_id not in route.allowed_thread_ids and
-                int(bool(message.message_thread_id)) not in route.allowed_thread_ids):
-            return False
-
-    return True
+    return not (
+        check_threads
+        and route.allowed_thread_ids is not None
+        and message.message_thread_id not in route.allowed_thread_ids
+        and int(bool(message.message_thread_id)) not in route.allowed_thread_ids
+    )
 
 
 def _targets(routes: list[Route], message: TgMessage, check_threads: bool) -> list[Target]:
@@ -445,12 +456,13 @@ def _targets(routes: list[Route], message: TgMessage, check_threads: bool) -> li
 
 # ====== FORWARDING ======
 
+
 async def forward_to_max(message: TgMessage, targets: list[Target]):
     """Forward one TG message to every MAX chat it is routed to."""
     if not targets:
         return
 
-    logging.info(
+    logger.info(
         "New Telegram post %s in chat %s -> MAX ids %s",
         message.message_id,
         message.chat.id,
@@ -491,32 +503,44 @@ async def forward_one_to_max(message: TgMessage, max_id: int, sender_prefix: str
             link=link,
         )
         if sent is None:
-            logging.warning(
+            logger.warning(
                 "Skipped media (message %s) in chat %s — file too large for Bot API",
-                message.message_id, message.chat.id,
+                message.message_id,
+                message.chat.id,
             )
             return
 
-        logging.info("Forwarded %s to MAX channel %d", media.upload_type.value, max_id)
+        logger.info("Forwarded %s to MAX channel %d", media.upload_type.value, max_id)
         mid = _extract_mid(sent)
         if mid:
             uploaded = [(message.message_id, media.file.file_unique_id, media.upload_type)]
             await message_map.bind(tg_ref, MaxRef(chat_id=max_id, mid=mid))
-            await message_map.set_max_post(max_id, mid, MaxPost(
-                atts=_sent_atts(sent, uploaded), text=text, caption_tg_id=caption_tg_id,
-            ))
+            await message_map.set_max_post(
+                max_id,
+                mid,
+                MaxPost(
+                    atts=_sent_atts(sent, uploaded),
+                    text=text,
+                    caption_tg_id=caption_tg_id,
+                ),
+            )
         return
 
     # text only
     if text:
         sent = await _safe_max_send(chat_id=max_id, text=text, link=link)
-        logging.info("Forwarded text to MAX id %d", max_id)
+        logger.info("Forwarded text to MAX id %d", max_id)
         mid = _extract_mid(sent)
         if mid:
             await message_map.bind(tg_ref, MaxRef(chat_id=max_id, mid=mid))
-            await message_map.set_max_post(max_id, mid, MaxPost(
-                text=text, caption_tg_id=caption_tg_id,
-            ))
+            await message_map.set_max_post(
+                max_id,
+                mid,
+                MaxPost(
+                    text=text,
+                    caption_tg_id=caption_tg_id,
+                ),
+            )
 
 
 # ====== EDIT FORWARDING ======
@@ -560,12 +584,14 @@ async def _rebuild_atts(
         if replace is not None and att.tg_message_id == replace[0]:
             _, media, path = replace
             attachments.append(InputMedia(path, media.upload_type))
-            atts.append(MaxAtt(
-                kind=media.upload_type.value,
-                sig=media.file.file_unique_id,
-                token="",
-                tg_message_id=att.tg_message_id,
-            ))
+            atts.append(
+                MaxAtt(
+                    kind=media.upload_type.value,
+                    sig=media.file.file_unique_id,
+                    token="",
+                    tg_message_id=att.tg_message_id,
+                )
+            )
             continue
 
         kept = _keep(att.kind, att.token)
@@ -578,12 +604,16 @@ async def _rebuild_atts(
                 if upload_type is not None:
                     kept = _keep(upload_type.value, token)
             if kept is None:
-                logging.warning(
-                    "MAX %s: attachment %d cannot be re-attached; edit skipped", mid, i,
+                logger.warning(
+                    "MAX %s: attachment %d cannot be re-attached; edit skipped",
+                    mid,
+                    i,
                 )
                 return None
             att = MaxAtt(
-                kind=kept.type.value, sig=att.sig, token=kept.payload.token,
+                kind=kept.type.value,
+                sig=att.sig,
+                token=kept.payload.token,
                 tg_message_id=att.tg_message_id,
             )
         attachments.append(kept)
@@ -593,7 +623,9 @@ async def _rebuild_atts(
 
 
 def _edited_text(
-    message: TgMessage, post: MaxPost | None, prefix: str,
+    message: TgMessage,
+    post: MaxPost | None,
+    prefix: str,
 ) -> tuple[str | None, int | None]:
     """The text the MAX copy should carry after this TG edit, and who owns it.
 
@@ -624,9 +656,11 @@ async def forward_edit_to_max(message: TgMessage, targets: list[Target]):
     for route, prefix in targets:
         mx = await message_map.get_max_in(message.chat.id, message.message_id, route.max_id)
         if mx is None:
-            logging.info(
+            logger.info(
                 "Edit ignored: no MAX mapping for TG (%s, %s) in MAX %d",
-                message.chat.id, message.message_id, route.max_id,
+                message.chat.id,
+                message.message_id,
+                route.max_id,
             )
             continue
 
@@ -660,22 +694,26 @@ async def edit_one_in_max(message: TgMessage, max_id: int, mid: str, prefix: str
             try:
                 temp_path = await download_to_temp(media.file, media.suffix)
             except (TelegramBadRequest, ValueError) as e:
-                logging.warning("Cannot download edited file (%s); keeping MAX media", e)
+                logger.warning("Cannot download edited file (%s); keeping MAX media", e)
                 replaces_media = False
 
         if replaces_media and media is not None and temp_path is not None:
             if owns is not None:
                 rebuilt = await _rebuild_atts(
-                    post, mid, replace=(message.message_id, media, temp_path),
+                    post,
+                    mid,
+                    replace=(message.message_id, media, temp_path),
                 )
             else:
                 rebuilt = _Rebuilt(
                     attachments=[InputMedia(temp_path, media.upload_type)],
-                    atts=(MaxAtt(
-                        kind=media.upload_type.value,
-                        sig=media.file.file_unique_id,
-                        tg_message_id=message.message_id,
-                    ),),
+                    atts=(
+                        MaxAtt(
+                            kind=media.upload_type.value,
+                            sig=media.file.file_unique_id,
+                            tg_message_id=message.message_id,
+                        ),
+                    ),
                 )
         else:
             rebuilt = await _keep_all(post, mid)
@@ -684,7 +722,11 @@ async def edit_one_in_max(message: TgMessage, max_id: int, mid: str, prefix: str
             return
 
         if not await _safe_max_edit(
-            max_id, message_id=mid, text=text, attachments=rebuilt.attachments, link=link,
+            max_id,
+            message_id=mid,
+            text=text,
+            attachments=rebuilt.attachments,
+            link=link,
         ):
             return
     finally:
@@ -707,10 +749,16 @@ async def edit_one_in_max(message: TgMessage, max_id: int, mid: str, prefix: str
                 for i, a in enumerate(atts)
             )
 
-    await message_map.set_max_post(max_id, mid, MaxPost(
-        atts=atts, text=text, caption_tg_id=caption_tg_id,
-    ))
-    logging.info("Edited MAX %s after TG edit", mid)
+    await message_map.set_max_post(
+        max_id,
+        mid,
+        MaxPost(
+            atts=atts,
+            text=text,
+            caption_tg_id=caption_tg_id,
+        ),
+    )
+    logger.info("Edited MAX %s after TG edit", mid)
 
 
 async def _edit_without_state(
@@ -746,29 +794,37 @@ async def _edit_without_state(
             try:
                 temp_path = await download_to_temp(media.file, media.suffix)
             except (TelegramBadRequest, ValueError) as e:
-                logging.warning("Cannot download edited file (%s); keeping MAX media", e)
+                logger.warning("Cannot download edited file (%s); keeping MAX media", e)
 
         if temp_path is not None and media is not None:
             attachments = [InputMedia(temp_path, media.upload_type)]
-            atts = [MaxAtt(
-                kind=media.upload_type.value,
-                sig=media.file.file_unique_id,
-                tg_message_id=message.message_id,
-            )]
+            atts = [
+                MaxAtt(
+                    kind=media.upload_type.value,
+                    sig=media.file.file_unique_id,
+                    tg_message_id=message.message_id,
+                )
+            ]
         else:
             for i, att in enumerate(remote):
                 upload_type = _att_upload_type(att)
                 kept = _keep(upload_type.value, _att_token(att)) if upload_type else None
                 if kept is None:
-                    logging.warning(
-                        "MAX %s: attachment %d cannot be re-attached; edit skipped", mid, i,
+                    logger.warning(
+                        "MAX %s: attachment %d cannot be re-attached; edit skipped",
+                        mid,
+                        i,
                     )
                     return
                 attachments.append(kept)
                 atts.append(MaxAtt(kind=kept.type.value, token=kept.payload.token))
 
         if not await _safe_max_edit(
-            max_id, message_id=mid, text=text, attachments=attachments, link=link,
+            max_id,
+            message_id=mid,
+            text=text,
+            attachments=attachments,
+            link=link,
         ):
             return
     finally:
@@ -779,18 +835,30 @@ async def _edit_without_state(
         refreshed = await _remote_atts(mid)
         if refreshed:
             atts = [
-                MaxAtt(kind=a.kind, sig=a.sig, token=_att_token(refreshed[i]),
-                       tg_message_id=a.tg_message_id)
-                for i, a in enumerate(atts) if i < len(refreshed)
+                MaxAtt(
+                    kind=a.kind,
+                    sig=a.sig,
+                    token=_att_token(refreshed[i]),
+                    tg_message_id=a.tg_message_id,
+                )
+                for i, a in enumerate(atts)
+                if i < len(refreshed)
             ]
 
-    await message_map.set_max_post(max_id, mid, MaxPost(
-        atts=tuple(atts), text=text, caption_tg_id=caption_tg_id,
-    ))
-    logging.info("Edited MAX %s after TG edit (layout unknown)", mid)
+    await message_map.set_max_post(
+        max_id,
+        mid,
+        MaxPost(
+            atts=tuple(atts),
+            text=text,
+            caption_tg_id=caption_tg_id,
+        ),
+    )
+    logger.info("Edited MAX %s after TG edit (layout unknown)", mid)
 
 
 # ====== MAIN HANDLERS ======
+
 
 @tg_router.channel_post(F.chat.id.in_(TG_CHANNEL_ROUTES))
 async def on_channel_post(message: TgMessage):

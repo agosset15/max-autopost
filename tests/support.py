@@ -9,8 +9,9 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, cast
 
 # ====== ENVIRONMENT (before importing src.*) ======
 
@@ -41,9 +42,7 @@ os.environ.setdefault("CHANNELS_FILE", _channels_file)
 os.environ.setdefault("WEBHOOK_URL", "https://example.test")
 os.environ.setdefault("WEBHOOK_SECRET", "test-secret")
 os.environ.setdefault("MAX_BOT_TOKEN", "max-test-token")
-os.environ.setdefault(
-    "TELEGRAM_BOT_TOKEN", "123456789:AAEoTESTtokenTESTtokenTESTtokenTESTt"
-)
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "123456789:AAEoTESTtokenTESTtokenTESTtokenTESTt")
 
 from aiogram.types import (  # noqa: E402
     Audio,
@@ -53,6 +52,7 @@ from aiogram.types import (  # noqa: E402
     PhotoSize,
     Video,
 )
+from maxapi.enums.attachment import AttachmentType  # noqa: E402
 from maxapi.enums.chat_type import ChatType  # noqa: E402
 from maxapi.types import (  # noqa: E402
     Message as MaxMessage,
@@ -69,17 +69,19 @@ from maxapi.types.attachments import (  # noqa: E402
     Video as MaxVideo,
     VideoUrl,
 )
+from redis.asyncio import Redis  # noqa: E402
 
 from src.storage.message_map import MessageMapService  # noqa: E402
 
-
 # ====== MAX MESSAGE BUILDERS ======
+
 
 def max_image(token: str) -> Image:
     return Image(
-        type="image",
-        payload=PhotoAttachmentPayload(photo_id=abs(hash(token)) % 10**9, token=token,
-                                       url=f"https://max.test/{token}.jpg"),
+        type=AttachmentType.IMAGE,
+        payload=PhotoAttachmentPayload(
+            photo_id=abs(hash(token)) % 10**9, token=token, url=f"https://max.test/{token}.jpg"
+        ),
     )
 
 
@@ -89,14 +91,14 @@ def max_video(token: str) -> MaxVideo:
 
 def max_audio(token: str) -> MaxAudio:
     return MaxAudio(
-        type="audio",
+        type=AttachmentType.AUDIO,
         payload=OtherAttachmentPayload(url=f"https://max.test/{token}.mp3", token=token),
     )
 
 
 def max_file(token: str, filename: str = "doc.pdf") -> MaxFile:
     return MaxFile(
-        type="file",
+        type=AttachmentType.FILE,
         filename=filename,
         size=10,
         payload=OtherAttachmentPayload(url=f"https://max.test/{token}.pdf", token=token),
@@ -105,7 +107,7 @@ def max_file(token: str, filename: str = "doc.pdf") -> MaxFile:
 
 def max_message(
     *,
-    chat_id: int = MAX_SOURCE,
+    chat_id: int | None = MAX_SOURCE,
     mid: str = "mid-1",
     text: str | None = None,
     attachments: list | None = None,
@@ -113,7 +115,8 @@ def max_message(
 ) -> MaxMessage:
     return MaxMessage(
         sender=User(user_id=sender_id, first_name="Sender", is_bot=False, last_activity_time=0)
-        if sender_id is not None else None,
+        if sender_id is not None
+        else None,
         recipient=Recipient(chat_id=chat_id, chat_type=ChatType.CHAT),
         timestamp=0,
         body=MessageBody(mid=mid, seq=1, text=text, attachments=attachments or []),
@@ -121,6 +124,7 @@ def max_message(
 
 
 # ====== TELEGRAM MESSAGE BUILDERS ======
+
 
 def tg_message(
     *,
@@ -136,28 +140,43 @@ def tg_message(
 ) -> TgMessage:
     kwargs: dict[str, Any] = {
         "message_id": message_id,
-        "date": datetime.now(tz=timezone.utc),
+        "date": datetime.now(tz=UTC),
         "chat": Chat(id=chat_id, type="channel"),
         "text": text,
         "caption": caption,
         "media_group_id": media_group_id,
     }
     if photo:
-        kwargs["photo"] = [PhotoSize(file_id=f"id-{photo}", file_unique_id=photo,
-                                     width=10, height=10, file_size=100)]
+        kwargs["photo"] = [
+            PhotoSize(
+                file_id=f"id-{photo}", file_unique_id=photo, width=10, height=10, file_size=100
+            )
+        ]
     if video:
-        kwargs["video"] = Video(file_id=f"id-{video}", file_unique_id=video, width=10,
-                                height=10, duration=1, file_size=100)
+        kwargs["video"] = Video(
+            file_id=f"id-{video}",
+            file_unique_id=video,
+            width=10,
+            height=10,
+            duration=1,
+            file_size=100,
+        )
     if audio:
-        kwargs["audio"] = Audio(file_id=f"id-{audio}", file_unique_id=audio, duration=1,
-                                file_size=100)
+        kwargs["audio"] = Audio(
+            file_id=f"id-{audio}", file_unique_id=audio, duration=1, file_size=100
+        )
     if document:
-        kwargs["document"] = Document(file_id=f"id-{document}", file_unique_id=document,
-                                      file_name="doc.pdf", file_size=100)
+        kwargs["document"] = Document(
+            file_id=f"id-{document}", file_unique_id=document, file_name="doc.pdf", file_size=100
+        )
     return TgMessage.model_validate(kwargs)
 
 
+_PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+
+
 # ====== FAKE REDIS ======
+
 
 class FakePipe:
     def __init__(self, redis: "FakeRedis") -> None:
@@ -224,17 +243,32 @@ class FakeRedis:
 
 def fake_map() -> MessageMapService:
     service = MessageMapService(url="redis://fake", ttl_seconds=60)
-    service._redis = FakeRedis()  # type: ignore[assignment]
+    service._redis = cast("Redis", FakeRedis())
     return service
 
 
+def fake_redis(service: MessageMapService) -> FakeRedis:
+    """The FakeRedis a `fake_map()` service writes to."""
+    redis = service.redis
+    assert isinstance(redis, FakeRedis)
+    return redis
+
+
 # ====== FAKE BOTS ======
+
 
 @dataclass
 class Call:
     name: str
     args: tuple = ()
     kwargs: dict = field(default_factory=dict)
+
+
+class _MaxSent:
+    """What `max_bot.send_message` hands back: the stored message."""
+
+    def __init__(self, message: MaxMessage) -> None:
+        self.message = message
 
 
 class _Sent:
@@ -277,8 +311,9 @@ class FakeTgBot:
             from aiogram.exceptions import TelegramBadRequest
             from aiogram.methods import SendMessage
 
-            raise TelegramBadRequest(method=SendMessage(chat_id=1, text="x"),
-                                     message="Bad Request: refused by test")
+            raise TelegramBadRequest(
+                method=SendMessage(chat_id=1, text="x"), message="Bad Request: refused by test"
+            )
 
     async def send_message(self, chat_id, text, **kwargs):
         self._record("send_message", chat_id, text, **kwargs)
@@ -347,8 +382,7 @@ class FakeTgBot:
 
     async def download_file(self, file_path, destination):
         self._record("download_file", file_path, destination)
-        with open(destination, "wb") as fh:
-            fh.write(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+        Path(destination).write_bytes(_PNG)
 
 
 _MAX_ATT_OF_UPLOAD = {
@@ -399,18 +433,14 @@ class FakeMaxBot:
         self.next_mid += 1
         self.last_mid = f"mid-{self.next_mid}"
         message = max_message(
-            chat_id=kwargs.get("chat_id"), mid=self.last_mid, text=kwargs.get("text"),
+            chat_id=kwargs.get("chat_id"),
+            mid=self.last_mid,
+            text=kwargs.get("text"),
             attachments=self._store_atts(kwargs.get("attachments")),
             sender_id=self.me.user_id,
         )
         self.remote[self.last_mid] = message
-
-        class _Result:
-            pass
-
-        result = _Result()
-        result.message = message  # type: ignore[attr-defined]
-        return result
+        return _MaxSent(message)
 
     async def edit_message(self, **kwargs):
         self.calls.append(Call("edit_message", kwargs=kwargs))
@@ -418,12 +448,13 @@ class FakeMaxBot:
             self.edit_fails -= 1
             from maxapi.exceptions import MaxApiError
 
-            raise MaxApiError(code="test.refused", raw={"code": "test.refused"})
+            raise MaxApiError(code=400, raw={"code": "test.refused"})
 
         mid = kwargs["message_id"]
         self.remote[mid] = max_message(
             chat_id=self.remote[mid].recipient.chat_id if mid in self.remote else None,
-            mid=mid, text=kwargs.get("text"),
+            mid=mid,
+            text=kwargs.get("text"),
             attachments=self._store_atts(kwargs.get("attachments")),
             sender_id=self.me.user_id,
         )
@@ -448,6 +479,5 @@ class FakeMaxBot:
     async def download_file(self, url, directory):
         self.calls.append(Call("download_file", args=(url, directory)))
         path = os.path.join(directory, os.path.basename(url) or "file.bin")
-        with open(path, "wb") as fh:
-            fh.write(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+        Path(path).write_bytes(_PNG)
         return path

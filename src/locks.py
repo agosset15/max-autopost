@@ -1,7 +1,8 @@
 """Concurrency guards shared by both handlers: serialisation and pacing."""
 
 import asyncio
-from typing import Hashable
+from collections.abc import Hashable
+from typing import ClassVar
 
 
 class keyed_lock:
@@ -16,8 +17,8 @@ class keyed_lock:
     a long-running bot does not accumulate one per message it ever saw.
     """
 
-    _locks: dict[Hashable, asyncio.Lock] = {}
-    _users: dict[Hashable, int] = {}
+    _locks: ClassVar[dict[Hashable, asyncio.Lock]] = {}
+    _users: ClassVar[dict[Hashable, int]] = {}
 
     def __init__(self, key: Hashable) -> None:
         self._key = key

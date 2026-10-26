@@ -1,4 +1,3 @@
-from typing import Optional
 import json
 import logging
 import os
@@ -7,6 +6,8 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -22,7 +23,9 @@ TELEGRAM_WEBHOOK_PATH: str = os.getenv("TELEGRAM_WEBHOOK_PATH", "/webhook/tg")
 MAX_WEBHOOK_PATH: str = os.getenv("MAX_WEBHOOK_PATH", "/webhook/max")
 
 TELEGRAM_WEBHOOK_URL = urlparse(WEBHOOK_URL)._replace(path=TELEGRAM_WEBHOOK_PATH).geturl()
-MAX_WEBHOOK_URL = os.getenv("MAX_WEBHOOK_URL") or urlparse(WEBHOOK_URL)._replace(path=MAX_WEBHOOK_PATH).geturl()
+MAX_WEBHOOK_URL = (
+    os.getenv("MAX_WEBHOOK_URL") or urlparse(WEBHOOK_URL)._replace(path=MAX_WEBHOOK_PATH).geturl()
+)
 
 WEBHOOK_HOST: str = os.getenv("WEBHOOK_HOST", "0.0.0.0")
 WEBHOOK_PORT: int = int(os.getenv("WEBHOOK_PORT", "9154"))
@@ -33,7 +36,7 @@ WEBHOOK_PORT: int = int(os.getenv("WEBHOOK_PORT", "9154"))
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 if not WEBHOOK_SECRET:
     WEBHOOK_SECRET = secrets.token_urlsafe(32)
-    logging.warning("WEBHOOK_SECRET not set; generated a random ephemeral secret for this run.")
+    logger.warning("WEBHOOK_SECRET not set; generated a random ephemeral secret for this run.")
 
 PROXY_URL = os.getenv("PROXY_URL", None)
 
@@ -79,7 +82,7 @@ class Route:
     sign_names: bool = False
 
 
-def _opt_set(value: Optional[list[str]]) -> frozenset[int] | None:
+def _opt_set(value: list[str] | None) -> frozenset[int] | None:
     return frozenset(int(x) for x in value) if value else None
 
 
@@ -125,40 +128,58 @@ for _e in _entries:
                 f"Entry tg_id={_tg_id} max_id={_max_id}: bidirectional only supported for type=group."
             )
         if "direction" in _e:
-            logging.warning(
+            logger.warning(
                 "Entry tg_id=%d max_id=%d: bidirectional=true, direction=%r ignored.",
-                _tg_id, _max_id, _direction,
+                _tg_id,
+                _max_id,
+                _direction,
             )
-        _add(TG_GROUP_ROUTES, "tg_to_max", _tg_id, Route(
-            tg_id=_tg_id,
-            max_id=_max_id,
-            allowed_user_ids=_allowed_users,
-            allowed_thread_ids=_allowed_threads,
-            sign_names=_sign_names,
-        ))
-        _add(MAX_ROUTES, "max_to_tg", _max_id, Route(
-            tg_id=_tg_id,
-            max_id=_max_id,
-            allowed_user_ids=_allowed_users,
-            allowed_thread_ids=None,
-            sign_names=_sign_names,
-        ))
+        _add(
+            TG_GROUP_ROUTES,
+            "tg_to_max",
+            _tg_id,
+            Route(
+                tg_id=_tg_id,
+                max_id=_max_id,
+                allowed_user_ids=_allowed_users,
+                allowed_thread_ids=_allowed_threads,
+                sign_names=_sign_names,
+            ),
+        )
+        _add(
+            MAX_ROUTES,
+            "max_to_tg",
+            _max_id,
+            Route(
+                tg_id=_tg_id,
+                max_id=_max_id,
+                allowed_user_ids=_allowed_users,
+                allowed_thread_ids=None,
+                sign_names=_sign_names,
+            ),
+        )
         continue
 
     if _direction == "max_to_tg":
         if _allowed_threads:
-            logging.warning(
+            logger.warning(
                 "Entry tg_id=%d max_id=%d is max_to_tg; "
                 "allowed_thread_ids are ignored in max_to_tg direction.",
-                _tg_id, _max_id,
+                _tg_id,
+                _max_id,
             )
-        _add(MAX_ROUTES, "max_to_tg", _max_id, Route(
-            tg_id=_tg_id,
-            max_id=_max_id,
-            allowed_user_ids=_allowed_users,
-            allowed_thread_ids=None,
-            sign_names=_sign_names,
-        ))
+        _add(
+            MAX_ROUTES,
+            "max_to_tg",
+            _max_id,
+            Route(
+                tg_id=_tg_id,
+                max_id=_max_id,
+                allowed_user_ids=_allowed_users,
+                allowed_thread_ids=None,
+                sign_names=_sign_names,
+            ),
+        )
         continue
 
     if _direction != "tg_to_max":
@@ -166,26 +187,33 @@ for _e in _entries:
 
     if _entry_type == "channel":
         if _sign_names:
-            logging.warning(
+            logger.warning(
                 "Entry tg_id=%d max_id=%d: sign_names ignored (type=channel, only type=group supported).",
-                _tg_id, _max_id,
+                _tg_id,
+                _max_id,
             )
         if _allowed_users or _allowed_threads:
-            logging.warning(
+            logger.warning(
                 "Entry tg_id=%d max_id=%d: allowed_user_ids/allowed_thread_ids ignored "
                 "(type=channel — channel posts carry no sender or thread).",
-                _tg_id, _max_id,
+                _tg_id,
+                _max_id,
             )
         # Channel posts have no from_user and no thread, so filters cannot apply.
         _add(TG_CHANNEL_ROUTES, "tg_to_max", _tg_id, Route(tg_id=_tg_id, max_id=_max_id))
     else:
-        _add(TG_GROUP_ROUTES, "tg_to_max", _tg_id, Route(
-            tg_id=_tg_id,
-            max_id=_max_id,
-            allowed_user_ids=_allowed_users,
-            allowed_thread_ids=_allowed_threads,
-            sign_names=_sign_names,
-        ))
+        _add(
+            TG_GROUP_ROUTES,
+            "tg_to_max",
+            _tg_id,
+            Route(
+                tg_id=_tg_id,
+                max_id=_max_id,
+                allowed_user_ids=_allowed_users,
+                allowed_thread_ids=_allowed_threads,
+                sign_names=_sign_names,
+            ),
+        )
 
 if not TG_CHANNEL_ROUTES and not TG_GROUP_ROUTES and not MAX_ROUTES:
     raise RuntimeError(f"'{_CHANNELS_FILE}' contains no mappings.")
@@ -204,8 +232,9 @@ MIRRORED_PAIRS: frozenset[tuple[int, int]] = frozenset(
 for _tg_id, _routes in TG_CHANNEL_ROUTES.items():
     for _r in _routes:
         if any(_back.tg_id == _tg_id for _back in MAX_ROUTES.get(_r.max_id, ())):
-            logging.warning(
+            logger.warning(
                 "Mirrored channel pair tg_id=%d max_id=%d (tg_to_max + max_to_tg): "
                 "channel posts made by the bot will be forwarded back and loop.",
-                _tg_id, _r.max_id,
+                _tg_id,
+                _r.max_id,
             )

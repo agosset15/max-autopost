@@ -6,8 +6,6 @@ from aiohttp import web
 from maxapi.enums.update import UpdateType
 from maxapi.webhook.aiohttp import AiohttpMaxWebhook
 
-from src.handlers.telegram import tg_router
-from src.handlers.max import max_router
 from src.config import (
     MAX_WEBHOOK_PATH,
     MAX_WEBHOOK_URL,
@@ -17,9 +15,12 @@ from src.config import (
     WEBHOOK_PORT,
     WEBHOOK_SECRET,
 )
+from src.handlers.max import max_router
+from src.handlers.telegram import tg_router
 from src.loader import max_bot, max_dp, message_map, tg_bot, tg_dp
 
 logging.basicConfig(level=logging.INFO, force=True)
+logger = logging.getLogger(__name__)
 
 
 def max_update_types() -> list[UpdateType]:
@@ -39,7 +40,7 @@ def max_update_types() -> list[UpdateType]:
 
 
 async def main():
-    logging.info("Starting bots...")
+    logger.info("Starting bots...")
 
     await message_map.connect()
 
@@ -54,21 +55,24 @@ async def main():
         allowed_updates=tg_dp.resolve_used_update_types(),
         secret_token=WEBHOOK_SECRET,
     )
-    logging.info("Telegram webhook set to %s", TELEGRAM_WEBHOOK_URL)
+    logger.info("Telegram webhook set to %s", TELEGRAM_WEBHOOK_URL)
 
     update_types = max_update_types()
     await max_bot.subscribe_webhook(
-        url=MAX_WEBHOOK_URL, update_types=update_types, secret=WEBHOOK_SECRET,
+        url=MAX_WEBHOOK_URL,
+        update_types=update_types,
+        secret=WEBHOOK_SECRET,
     )
-    logging.info(
+    logger.info(
         "MAX webhook set to %s (updates: %s)",
-        MAX_WEBHOOK_URL, ", ".join(t.value for t in update_types),
+        MAX_WEBHOOK_URL,
+        ", ".join(t.value for t in update_types),
     )
 
     app = web.Application()
-    SimpleRequestHandler(
-        dispatcher=tg_dp, bot=tg_bot, secret_token=WEBHOOK_SECRET
-    ).register(app, path=TELEGRAM_WEBHOOK_PATH)
+    SimpleRequestHandler(dispatcher=tg_dp, bot=tg_bot, secret_token=WEBHOOK_SECRET).register(
+        app, path=TELEGRAM_WEBHOOK_PATH
+    )
     AiohttpMaxWebhook(dp=max_dp, bot=max_bot, secret=WEBHOOK_SECRET).setup(
         app, path=MAX_WEBHOOK_PATH
     )
@@ -77,12 +81,12 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, WEBHOOK_HOST, WEBHOOK_PORT)
     await site.start()
-    logging.info(
+    logger.info(
         "Webhook server listening on %s:%d (paths: %s; %s)",
         WEBHOOK_HOST,
         WEBHOOK_PORT,
         TELEGRAM_WEBHOOK_PATH,
-        MAX_WEBHOOK_PATH
+        MAX_WEBHOOK_PATH,
     )
 
     try:
@@ -92,7 +96,7 @@ async def main():
         await tg_bot.delete_webhook()
         await max_bot.delete_webhook()
         await message_map.close()
-        logging.info("Shutdown complete")
+        logger.info("Shutdown complete")
 
 
 if __name__ == "__main__":

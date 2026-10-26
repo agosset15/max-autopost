@@ -10,6 +10,7 @@ from tests.support import (
     TG_CHANNEL,
     TG_SOURCE_MAX,
     fake_map,
+    fake_redis,
 )
 
 from src.config import MIRRORED_PAIRS
@@ -26,15 +27,20 @@ class MappingTests(unittest.IsolatedAsyncioTestCase):
         await self.map.bind_many(refs, MaxRef(MAX_CHANNEL, "m1"))
         for ref in refs:
             mx = await self.map.get_max_in(TG_CHANNEL, ref.message_id, MAX_CHANNEL)
+            assert mx is not None
             self.assertEqual(mx.mid, "m1")
         head = await self.map.get_tg_in(MAX_CHANNEL, "m1", TG_CHANNEL)
+        assert head is not None
         self.assertEqual(head.message_id, 5)
 
     async def test_fan_out_keeps_one_counterpart_per_chat(self):
         await self.map.bind(TgRef(TG_CHANNEL, 5), MaxRef(MAX_CHANNEL, "a"))
         await self.map.bind(TgRef(TG_CHANNEL, 5), MaxRef(MAX_SOURCE, "b"))
-        self.assertEqual((await self.map.get_max_in(TG_CHANNEL, 5, MAX_CHANNEL)).mid, "a")
-        self.assertEqual((await self.map.get_max_in(TG_CHANNEL, 5, MAX_SOURCE)).mid, "b")
+        in_channel = await self.map.get_max_in(TG_CHANNEL, 5, MAX_CHANNEL)
+        in_source = await self.map.get_max_in(TG_CHANNEL, 5, MAX_SOURCE)
+        assert in_channel is not None and in_source is not None
+        self.assertEqual(in_channel.mid, "a")
+        self.assertEqual(in_source.mid, "b")
         self.assertEqual(len(await self.map.get_max_all(TG_CHANNEL, 5)), 2)
 
 
@@ -43,11 +49,14 @@ class PostStateTests(unittest.IsolatedAsyncioTestCase):
         self.map = fake_map()
 
     async def test_tg_post_round_trip(self):
-        post = TgPost(items=(
-            TgItem(10, "photo", "t:a", album=True, caption=True),
-            TgItem(11, "photo", "t:b", album=True),
-            TgItem(12, "document", "t:c"),
-        ), text="cap")
+        post = TgPost(
+            items=(
+                TgItem(10, "photo", "t:a", album=True, caption=True),
+                TgItem(11, "photo", "t:b", album=True),
+                TgItem(12, "document", "t:c"),
+            ),
+            text="cap",
+        )
         await self.map.set_tg_post(TG_SOURCE_MAX, 10, post)
         self.assertEqual(await self.map.get_tg_post(TG_SOURCE_MAX, 10), post)
         self.assertEqual(post.message_ids, [10, 11, 12])
@@ -70,8 +79,9 @@ class PostStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.map.get_max_post(MAX_CHANNEL, "nope"))
 
     async def test_corrupt_state_reads_as_none(self):
-        self.map.redis.values[self.map._tg_post_key(TG_SOURCE_MAX, 1)] = "{not json"
-        self.map.redis.values[self.map._max_post_key(MAX_CHANNEL, "m")] = '{"atts": [{"x": 1}]}'
+        values = fake_redis(self.map).values
+        values[self.map._tg_post_key(TG_SOURCE_MAX, 1)] = "{not json"
+        values[self.map._max_post_key(MAX_CHANNEL, "m")] = '{"atts": [{"x": 1}]}'
         self.assertIsNone(await self.map.get_tg_post(TG_SOURCE_MAX, 1))
         self.assertIsNone(await self.map.get_max_post(MAX_CHANNEL, "m"))
 
@@ -118,6 +128,7 @@ class ThrottleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_concurrent_calls_queue_up(self):
         import asyncio
+        from itertools import pairwise
 
         throttle = keyed_throttle(0.02)
         loop = asyncio.get_running_loop()
@@ -128,7 +139,7 @@ class ThrottleTests(unittest.IsolatedAsyncioTestCase):
             stamps.append(loop.time())
 
         await asyncio.gather(*(tick() for _ in range(3)))
-        gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+        gaps = [b - a for a, b in pairwise(stamps)]
         self.assertTrue(all(gap >= 0.015 for gap in gaps), gaps)
 
 

@@ -12,6 +12,29 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "ruff>=0.15.5",
-    "ty>=0.0.21",
+    "ruff>=0.17.2",
+    "ty>=0.0.92",
 ]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# Imports deliberately follow the environment setup in tests/support.py.
+extend-select = ["E402"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+# tests/support.py prepares the environment that importing src.* depends on, so
+# it has to be imported before anything from src.
+section-order = [
+    "future",
+    "standard-library",
+    "third-party",
+    "testing",
+    "first-party",
+    "local-folder",
+]
+
+[tool.ruff.lint.isort.sections]
+testing = ["tests"]

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional
+from typing import Any
 
 from redis.asyncio import Redis, from_url
 
@@ -131,7 +132,7 @@ class MessageMapService:
     def __init__(self, url: str, ttl_seconds: int) -> None:
         self._url = url
         self._ttl = ttl_seconds
-        self._redis: Optional[Redis] = None
+        self._redis: Redis | None = None
 
     async def connect(self) -> None:
         if self._redis is not None:
@@ -240,7 +241,7 @@ class MessageMapService:
         members = await self.redis.smembers(self._tg_key(tg_chat_id, tg_msg_id))
         return self._parse_max(members)  # ty:ignore[invalid-argument-type]
 
-    async def get_max_in(self, tg_chat_id: int, tg_msg_id: int, max_chat_id: int) -> Optional[MaxRef]:
+    async def get_max_in(self, tg_chat_id: int, tg_msg_id: int, max_chat_id: int) -> MaxRef | None:
         """The MAX counterpart of a TG message inside one specific MAX chat."""
         for mx in await self.get_max_all(tg_chat_id, tg_msg_id):
             if mx.chat_id == max_chat_id:
@@ -253,7 +254,7 @@ class MessageMapService:
         members = await self.redis.smembers(self._max_key(max_chat_id, max_mid))
         return self._parse_tg(members)  # ty:ignore[invalid-argument-type]
 
-    async def get_tg_in(self, max_chat_id: int, max_mid: str, tg_chat_id: int) -> Optional[TgRef]:
+    async def get_tg_in(self, max_chat_id: int, max_mid: str, tg_chat_id: int) -> TgRef | None:
         """The TG counterpart of a MAX message inside one specific TG chat."""
         for tg in await self.get_tg_all(max_chat_id, max_mid):
             if tg.chat_id == tg_chat_id:
@@ -285,7 +286,7 @@ class MessageMapService:
             self._tg_post_key(chat_id, head_msg_id), json.dumps(payload), ex=self._ttl
         )
 
-    async def get_tg_post(self, chat_id: int, head_msg_id: int) -> Optional[TgPost]:
+    async def get_tg_post(self, chat_id: int, head_msg_id: int) -> TgPost | None:
         raw = await self.redis.get(self._tg_post_key(chat_id, head_msg_id))
         data = _loads(raw)
         if data is None:
@@ -293,13 +294,15 @@ class MessageMapService:
         items = []
         for entry in data.get("items") or ():
             try:
-                items.append(TgItem(
-                    message_id=int(entry["id"]),
-                    kind=str(entry["kind"]),
-                    sig=str(entry.get("sig") or ""),
-                    album=bool(entry.get("album")),
-                    caption=bool(entry.get("caption")),
-                ))
+                items.append(
+                    TgItem(
+                        message_id=int(entry["id"]),
+                        kind=str(entry["kind"]),
+                        sig=str(entry.get("sig") or ""),
+                        album=bool(entry.get("album")),
+                        caption=bool(entry.get("caption")),
+                    )
+                )
             except (KeyError, TypeError, ValueError):
                 logger.warning("Corrupt TgPost item: %r", entry)
                 return None
@@ -323,11 +326,9 @@ class MessageMapService:
             "text": post.text,
             "caption_tg_id": post.caption_tg_id,
         }
-        await self.redis.set(
-            self._max_post_key(chat_id, mid), json.dumps(payload), ex=self._ttl
-        )
+        await self.redis.set(self._max_post_key(chat_id, mid), json.dumps(payload), ex=self._ttl)
 
-    async def get_max_post(self, chat_id: int, mid: str) -> Optional[MaxPost]:
+    async def get_max_post(self, chat_id: int, mid: str) -> MaxPost | None:
         raw = await self.redis.get(self._max_post_key(chat_id, mid))
         data = _loads(raw)
         if data is None:
@@ -336,12 +337,14 @@ class MessageMapService:
         for entry in data.get("atts") or ():
             try:
                 tg = entry.get("tg")
-                atts.append(MaxAtt(
-                    kind=str(entry["kind"]),
-                    sig=str(entry.get("sig") or ""),
-                    token=str(entry.get("token") or ""),
-                    tg_message_id=int(tg) if tg is not None else None,
-                ))
+                atts.append(
+                    MaxAtt(
+                        kind=str(entry["kind"]),
+                        sig=str(entry.get("sig") or ""),
+                        token=str(entry.get("token") or ""),
+                        tg_message_id=int(tg) if tg is not None else None,
+                    )
+                )
             except (KeyError, TypeError, ValueError):
                 logger.warning("Corrupt MaxPost attachment: %r", entry)
                 return None

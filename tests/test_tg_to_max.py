@@ -10,17 +10,17 @@ import asyncio
 import unittest
 from unittest import mock
 
+from maxapi.types import InputMedia
+from maxapi.types.attachments.upload import AttachmentUpload
+
 from tests.support import (
-    FakeMaxBot,
-    FakeTgBot,
     MAX_CHANNEL,
     TG_CHANNEL,
+    FakeMaxBot,
+    FakeTgBot,
     fake_map,
     tg_message,
 )
-
-from maxapi.types import InputMedia
-from maxapi.types.attachments.upload import AttachmentUpload
 
 from src.config import TG_CHANNEL_ROUTES
 from src.handlers import telegram as handler
@@ -62,6 +62,12 @@ class _Base(unittest.IsolatedAsyncioTestCase):
 
     async def edit(self, message) -> None:
         await handler.forward_edit_to_max(message, self.targets)
+
+    async def post(self, mid: str) -> MaxPost:
+        """The MAX post state recorded for a mirrored message."""
+        post = await self.map.get_max_post(MAX_CHANNEL, mid)
+        assert post is not None
+        return post
 
     def edit_kwargs(self) -> dict:
         return self.max.last("edit_message").kwargs
@@ -113,16 +119,17 @@ class EditedTextTests(unittest.TestCase):
 class ForwardTests(_Base):
     async def test_text_message_records_its_text(self):
         mid = await self.send(tg_message(message_id=5, text="hello"))
-        post = await self.map.get_max_post(MAX_CHANNEL, mid)
+        post = await self.post(mid)
         self.assertEqual(post.text, "hello")
         self.assertEqual(post.atts, ())
         self.assertEqual(post.caption_tg_id, 5)
 
     async def test_photo_records_the_max_token(self):
         mid = await self.send(tg_message(message_id=5, photo="p1", caption="cap"))
-        post = await self.map.get_max_post(MAX_CHANNEL, mid)
-        self.assertEqual([(a.kind, a.sig, a.tg_message_id) for a in post.atts],
-                         [("image", "p1", 5)])
+        post = await self.post(mid)
+        self.assertEqual(
+            [(a.kind, a.sig, a.tg_message_id) for a in post.atts], [("image", "p1", 5)]
+        )
         self.assertTrue(post.atts[0].token)
 
     async def test_album_records_one_attachment_per_item(self):
@@ -132,9 +139,11 @@ class ForwardTests(_Base):
             tg_message(message_id=7, video="v1", media_group_id="g"),
         ]
         mid = await self.send_album(messages)
-        post = await self.map.get_max_post(MAX_CHANNEL, mid)
-        self.assertEqual([(a.kind, a.sig, a.tg_message_id) for a in post.atts],
-                         [("image", "p1", 5), ("image", "p2", 6), ("video", "v1", 7)])
+        post = await self.post(mid)
+        self.assertEqual(
+            [(a.kind, a.sig, a.tg_message_id) for a in post.atts],
+            [("image", "p1", 5), ("image", "p2", 6), ("video", "v1", 7)],
+        )
         self.assertEqual(post.caption_tg_id, 5)
         self.assertEqual(post.text, "cap")
 
@@ -143,9 +152,11 @@ class ForwardTests(_Base):
             tg_message(message_id=5, photo="p1", caption="cap", media_group_id="g"),
             tg_message(message_id=6, photo="p2", media_group_id="g"),
         ]
-        messages[1].photo[0].__dict__["file_size"] = handler.TG_FILE_SIZE_LIMIT + 1
+        oversized = messages[1].photo
+        assert oversized is not None
+        oversized[0].__dict__["file_size"] = handler.TG_FILE_SIZE_LIMIT + 1
         mid = await self.send_album(messages)
-        post = await self.map.get_max_post(MAX_CHANNEL, mid)
+        post = await self.post(mid)
         self.assertEqual([a.tg_message_id for a in post.atts], [5])
 
 
@@ -156,12 +167,12 @@ class EditTests(_Base):
         self.assertEqual(self.edit_kwargs()["message_id"], mid)
         self.assertEqual(self.edit_kwargs()["text"], "new")
         self.assertEqual(self.sent_attachments(), [])
-        post = await self.map.get_max_post(MAX_CHANNEL, mid)
+        post = await self.post(mid)
         self.assertEqual(post.text, "new")
 
     async def test_caption_edit_keeps_the_media_by_token(self):
         mid = await self.send(tg_message(message_id=5, photo="p1", caption="old"))
-        stored = (await self.map.get_max_post(MAX_CHANNEL, mid)).atts[0].token
+        stored = (await self.post(mid)).atts[0].token
         self.tg.calls.clear()
 
         await self.edit(tg_message(message_id=5, photo="p1", caption="new"))
@@ -181,7 +192,7 @@ class EditTests(_Base):
         attachments = self.sent_attachments()
         self.assertEqual(len(attachments), 1)
         self.assertIsInstance(attachments[0], InputMedia)
-        post = await self.map.get_max_post(MAX_CHANNEL, mid)
+        post = await self.post(mid)
         self.assertEqual(post.atts[0].sig, "p2")
         # the token of the new file was read back for the next edit
         self.assertTrue(post.atts[0].token)
@@ -190,14 +201,15 @@ class EditTests(_Base):
     async def test_photo_replaced_by_a_video_changes_the_attachment_type(self):
         mid = await self.send(tg_message(message_id=5, photo="p1", caption="cap"))
         await self.edit(tg_message(message_id=5, video="v1", caption="cap"))
-        post = await self.map.get_max_post(MAX_CHANNEL, mid)
+        post = await self.post(mid)
         self.assertEqual([(a.kind, a.sig) for a in post.atts], [("video", "v1")])
 
     async def test_undownloadable_replacement_keeps_the_old_media(self):
         mid = await self.send(tg_message(message_id=5, photo="p1", caption="cap"))
-        stored = (await self.map.get_max_post(MAX_CHANNEL, mid)).atts[0].token
+        stored = (await self.post(mid)).atts[0].token
 
         edited = tg_message(message_id=5, photo="p2", caption="cap")
+        assert edited.photo is not None
         edited.photo[0].__dict__["file_size"] = handler.TG_FILE_SIZE_LIMIT + 1
         await self.edit(edited)
 
@@ -211,7 +223,7 @@ class EditTests(_Base):
             tg_message(message_id=6, photo="p2", media_group_id="g"),
         ]
         mid = await self.send_album(messages)
-        tokens = [a.token for a in (await self.map.get_max_post(MAX_CHANNEL, mid)).atts]
+        tokens = [a.token for a in (await self.post(mid)).atts]
         self.tg.calls.clear()
 
         await self.edit(tg_message(message_id=5, photo="p1", caption="new", media_group_id="g"))
@@ -228,7 +240,7 @@ class EditTests(_Base):
             tg_message(message_id=7, photo="p3", media_group_id="g"),
         ]
         mid = await self.send_album(messages)
-        tokens = [a.token for a in (await self.map.get_max_post(MAX_CHANNEL, mid)).atts]
+        tokens = [a.token for a in (await self.post(mid)).atts]
 
         await self.edit(tg_message(message_id=6, photo="p9", media_group_id="g"))
 
@@ -240,7 +252,7 @@ class EditTests(_Base):
         # the text of the album, owned by another item, is left alone
         self.assertEqual(self.edit_kwargs()["text"], "cap")
 
-        post = await self.map.get_max_post(MAX_CHANNEL, mid)
+        post = await self.post(mid)
         self.assertEqual([a.sig for a in post.atts], ["p1", "p9", "p3"])
         self.assertEqual(post.caption_tg_id, 5)
         self.assertTrue(all(a.token for a in post.atts))
@@ -253,7 +265,7 @@ class EditTests(_Base):
         mid = await self.send_album(messages)
         await self.edit(tg_message(message_id=6, photo="p2", media_group_id="g"))
         self.assertEqual(self.edit_kwargs()["text"], "cap")
-        self.assertEqual((await self.map.get_max_post(MAX_CHANNEL, mid)).text, "cap")
+        self.assertEqual((await self.post(mid)).text, "cap")
 
     async def test_album_caption_removal_clears_the_text(self):
         messages = [
@@ -263,7 +275,7 @@ class EditTests(_Base):
         mid = await self.send_album(messages)
         await self.edit(tg_message(message_id=5, photo="p1", media_group_id="g"))
         self.assertEqual(self.edit_kwargs()["text"], "")
-        post = await self.map.get_max_post(MAX_CHANNEL, mid)
+        post = await self.post(mid)
         self.assertEqual(post.text, "")
         self.assertIsNone(post.caption_tg_id)
         self.assertEqual(len(post.atts), 2)
@@ -274,7 +286,7 @@ class EditTests(_Base):
 
     async def test_edit_without_a_layout_restates_the_media_from_max(self):
         mid = await self.send(tg_message(message_id=5, photo="p1", caption="old"))
-        stored = (await self.map.get_max_post(MAX_CHANNEL, mid)).atts[0].token
+        stored = (await self.post(mid)).atts[0].token
         await self.map.drop_max_post(MAX_CHANNEL, mid)
 
         # an album item: its position in the attachment list is unknown, so the
@@ -284,7 +296,7 @@ class EditTests(_Base):
         attachments = self.sent_attachments()
         self.assertEqual([a.payload.token for a in attachments], [stored])
         self.assertEqual(self.edit_kwargs()["text"], "new")
-        post = await self.map.get_max_post(MAX_CHANNEL, mid)
+        post = await self.post(mid)
         self.assertEqual(post.text, "new")
 
     async def test_edit_without_a_layout_keeps_the_album_text(self):
@@ -299,7 +311,7 @@ class EditTests(_Base):
 
         self.assertEqual(self.edit_kwargs()["text"], "cap")
         self.assertEqual(len(self.sent_attachments()), 2)
-        self.assertEqual((await self.map.get_max_post(MAX_CHANNEL, mid)).text, "cap")
+        self.assertEqual((await self.post(mid)).text, "cap")
 
     async def test_edit_without_a_layout_reuploads_a_lone_message(self):
         mid = await self.send(tg_message(message_id=5, photo="p1", caption="old"))
@@ -308,7 +320,7 @@ class EditTests(_Base):
         await self.edit(tg_message(message_id=5, photo="p2", caption="new"))
 
         self.assertIsInstance(self.sent_attachments()[0], InputMedia)
-        post = await self.map.get_max_post(MAX_CHANNEL, mid)
+        post = await self.post(mid)
         self.assertEqual([(a.kind, a.sig) for a in post.atts], [("image", "p2")])
 
     async def test_html_rejection_retries_as_plain_text(self):
@@ -318,13 +330,13 @@ class EditTests(_Base):
         edits = [c for c in self.max.calls if c.name == "edit_message"]
         self.assertEqual(len(edits), 2)
         self.assertIsNone(edits[1].kwargs["parse_mode"])
-        self.assertEqual((await self.map.get_max_post(MAX_CHANNEL, mid)).text, "new")
+        self.assertEqual((await self.post(mid)).text, "new")
 
     async def test_failed_edit_leaves_the_recorded_state_alone(self):
         mid = await self.send(tg_message(message_id=5, text="old"))
         self.max.edit_fails = 2
         await self.edit(tg_message(message_id=5, text="new"))
-        self.assertEqual((await self.map.get_max_post(MAX_CHANNEL, mid)).text, "old")
+        self.assertEqual((await self.post(mid)).text, "old")
 
 
 if __name__ == "__main__":
