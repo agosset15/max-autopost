@@ -6,7 +6,7 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass
-from typing import Any, TypeAlias
+from typing import Any
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -31,11 +31,11 @@ media_groups: dict[str, list[TgMessage]] = {}
 media_group_targets: dict[str, list["Target"]] = {}
 _bg_tasks: set[asyncio.Task] = set()
 
-AnyMedia: TypeAlias = Video | PhotoSize | Document | Audio
+type AnyMedia = Video | PhotoSize | Document | Audio
 # One destination of a TG message: the route plus the signature prefix it wants.
-Target: TypeAlias = tuple[Route, str]
+type Target = tuple[Route, str]
 # What one uploaded file was: (source TG message, file identity, MAX upload type).
-Uploaded: TypeAlias = tuple[int, str, UploadType]
+type Uploaded = tuple[int, str, UploadType]
 
 tg_router = Router()
 
